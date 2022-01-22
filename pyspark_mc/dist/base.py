@@ -4,6 +4,7 @@ from abc import ABCMeta
 from types import UnionType
 from typing import (
     Any,
+    List,
     Type,
     get_args,
     get_origin,
@@ -37,10 +38,17 @@ def get_type(p: inspect.Parameter) -> type:
     return t
 
 
+# FIXME: Simplify, use recursive type approach :)
 map_types = {
     float: T.FloatType,
     int: T.IntegerType,
     str: T.StringType,
+    list[str]: lambda: T.ArrayType(T.StringType(), containsNull=False),
+    List[str]: lambda: T.ArrayType(T.StringType(), containsNull=False),
+    list[int]: lambda: T.ArrayType(T.IntegerType(), containsNull=False),
+    List[int]: lambda: T.ArrayType(T.IntegerType(), containsNull=False),
+    list[float]: lambda: T.ArrayType(T.FloatType(), containsNull=False),
+    List[float]: lambda: T.ArrayType(T.FloatType(), containsNull=False),
     np.ndarray: lambda: T.ArrayType(T.FloatType(), containsNull=False),
 }
 
@@ -49,8 +57,14 @@ def field_for(name: str, t: Type, default=inspect.Parameter.empty) -> T.StructFi
     """Gets a struct field for a given type."""
     nullable = False  # can become true
 
-    # Allow: `Optional[x]`, `Union[x, None]`, `x|None`
-    if get_origin(t) in [Union, UnionType]:
+    if get_origin(t) in [List, list]:
+        # Allow: `List[x]`, `list[x]`
+        args = get_args(t)
+        if len(args) != 1:
+            raise TypeError(f"Multiple args given to list annotation: {t!r}")
+        # and map_types will fix the rest? TODO: a proper recursive approach.
+    elif get_origin(t) in [Union, UnionType]:
+        # Allow: `Optional[x]`, `Union[x, None]`, `x|None`
         args = get_args(t)
         if (None in args) or (type(None) in args):
             nullable = True
