@@ -6,5 +6,6 @@ dependencies:
   - pip
   - pandas
   - pyspark
+  - jupyter # for interactive
   - pip:
-      - -e .[dev,docs]
+      - -e .[jupyter,dev,docs]
