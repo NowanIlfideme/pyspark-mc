@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools >= 45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["pyspark_mc"]
+
+[tool.mypy]
+files = 'pyspark_mc/**/*.py'
+warn_unused_configs = true
+
+[tool.black]
+line-length = 88
+include = '^/pyspark_mc.*\.py' # all .py files
+extend-exclude = '''
+^/setup.py
+|^/docs
+|^/dist
+'''
