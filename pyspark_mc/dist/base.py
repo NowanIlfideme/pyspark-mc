@@ -1,120 +1,82 @@
-"""Basic distributions."""
+"""Disrtribution base objects."""
 
-from abc import ABCMeta
-from types import UnionType
-from typing import (
-    Any,
-    List,
-    Type,
-    get_args,
-    get_origin,
-    no_type_check,
-    Union,
-)
 import inspect
-
+from abc import ABC, abstractmethod
 import numpy as np
-import pyspark.sql.types as T
+
+from numpy.random import Generator, default_rng
+from pyspark.sql.types import StructType
+
+from pyspark_mc.internals.type_mapping import (
+    convert_annotation_to_spark,
+    get_param_type,
+)
 
 
-@no_type_check
-def eval_type(t, globalns=None, localns=None, recursive_guard=frozenset()):
-    """Wrapper for typing._eval_type() function."""
-    from typing import _eval_type  # noqa
+class Distribution(ABC):
+    """Base class for distributions."""
 
-    if localns is None:
-        localns = {}
-    if globalns is None:
-        globalns = globals()
+    def __init__(self):
+        """Creates the distribution from the arguments."""
 
-    return _eval_type(t, globalns, localns, recursive_guard=recursive_guard)
+    def sample(
+        self,
+        shape: int | tuple[int, ...] = 1,
+        *,
+        random_state: int | Generator | None = None,
+    ) -> np.ndarray:
+        """Samples data from this distribution.
 
+        FIXME: Figure out what the semantics are supposed to be here.
+        """
+        # Get shape
+        if isinstance(shape, int):
+            shape = (shape,)
+        shape = tuple(shape)
 
-def get_type(p: inspect.Parameter) -> type:
-    """Tries to get the type from a parameter."""
-    if p.annotation == p.empty:
-        raise TypeError(f"Missing annotation for {p!r}")
-    t = eval_type(p.annotation)
-    return t
+        # Get RNG
+        if isinstance(random_state, Generator):
+            rng = random_state
+        else:
+            rng = default_rng(random_state)
+        # Sample
+        res = self._sample(shape, rng)
+        return res
 
+    @abstractmethod
+    def _sample(self, shape: tuple[int, ...], rng: Generator) -> np.ndarray:
+        """Internal sample method, which should be overridden."""
 
-# FIXME: Simplify, use recursive type approach :)
-map_types = {
-    float: T.FloatType,
-    int: T.IntegerType,
-    str: T.StringType,
-    list[str]: lambda: T.ArrayType(T.StringType(), containsNull=False),
-    List[str]: lambda: T.ArrayType(T.StringType(), containsNull=False),
-    list[int]: lambda: T.ArrayType(T.IntegerType(), containsNull=False),
-    List[int]: lambda: T.ArrayType(T.IntegerType(), containsNull=False),
-    list[float]: lambda: T.ArrayType(T.FloatType(), containsNull=False),
-    List[float]: lambda: T.ArrayType(T.FloatType(), containsNull=False),
-    np.ndarray: lambda: T.ArrayType(T.FloatType(), containsNull=False),
-}
-
-
-def field_for(name: str, t: Type, default=inspect.Parameter.empty) -> T.StructField:
-    """Gets a struct field for a given type."""
-    nullable = False  # can become true
-
-    if get_origin(t) in [List, list]:
-        # Allow: `List[x]`, `list[x]`
-        args = get_args(t)
-        if len(args) != 1:
-            raise TypeError(f"Multiple args given to list annotation: {t!r}")
-        # and map_types will fix the rest? TODO: a proper recursive approach.
-    elif get_origin(t) in [Union, UnionType]:
-        # Allow: `Optional[x]`, `Union[x, None]`, `x|None`
-        args = get_args(t)
-        if (None in args) or (type(None) in args):
-            nullable = True
-        clean_args = tuple(x for x in args if x not in [None, type(None)])
-        if len(clean_args) == 0:
-            raise TypeError(f"Requires at least one type, got {t!r}")
-        elif len(clean_args) > 1:
-            raise TypeError(f"Multiple types (non-Optional) are unsupported: {args}")
-        t = clean_args[0]
-    elif get_origin(t) is not None:
-        raise TypeError(f"Unsupported type annotation: {t!r}")
-
-    # Default types?
-    if default == inspect.Parameter.empty:
-        pass
-    elif default is None:
-        # Disallow implicit nullable default?
-        nullable = True
-    else:
-        # TODO: check default type
-        pass
-
-    # Map data types
-    dt = map_types.get(t, None)()
-    if dt is None:
-        raise TypeError(f"Unsupported type annotation: {t!r}")
-
-    return T.StructField(name, dt, nullable=nullable)
-
-
-class DistroMeta(ABCMeta):
-    """Metaclass for distribution objects."""
-
-    def __new__(cls, name: str, bases: tuple[type, ...], namespace: dict[str, Any]):
-        """Creates a new Distribution class."""
-        x = super().__new__(cls, name, bases, namespace)
-
-        if inspect.isabstract(x):
-            # Abstact - don't do any more magic.
-            return x
-
-        # Inspect to get init arguments, and set a struct type
-        # TODO: This can be done via a class method, right? No metaclass needed?
-        sig = inspect.signature(x.__init__)
+    @classmethod
+    def as_struct_type(cls) -> StructType:
+        """Gets the corresponding PySpark StructType for this distribution."""
+        sig = inspect.signature(cls.__init__)
+        params = list(sig.parameters.values())[1:]
         fields = []
-        for param in list(sig.parameters.values())[1:]:
-            t = get_type(param)
-            fld = field_for(param.name, t, default=param.default)
+        for p in params:
+            t = get_param_type(p)
+            fld = convert_annotation_to_spark(p.name, t)
             fields.append(fld)
-        SType = T.StructType(fields)
-        x.SType = SType
+        return StructType(fields)
 
-        return x
+    def __init_subclass__(cls) -> None:
+        """Checks concrete subclasses for correctness of implementation."""
+        if inspect.isabstract(cls):
+            return
+        # Check struct type implementation
+        try:
+            st = cls.as_struct_type()
+            assert isinstance(st, StructType)
+        except Exception as e:
+            raise TypeError(f"Improperly defined type {cls!r}") from e
+
+    def __repr__(self) -> str:
+        """Readable representation."""
+        cn = type(self).__qualname__
+        sig = inspect.signature(self.__init__)
+        params = list(sig.parameters.values())[0:]
+        mapping = []
+        for p in params:
+            mapping.append([p.name, getattr(self, p.name, "???")])
+        ppack = ", ".join([f"{k!s}={v!r}" for k, v in mapping])
+        return f"{cn}({ppack})"
